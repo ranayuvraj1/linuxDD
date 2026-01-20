@@ -1,213 +1,146 @@
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/uaccess.h>
-#include <linux/hrtimer.h>
-#include <linux/workqueue.h>
-#include <linux/mutex.h>
-#include <linux/spinlock.h>
-#include <linux/semaphore.h>
-#include <linux/atomic.h>
-#include <linux/delay.h>
+#include <linux/ioctl.h>
 
-#define DEVICE_NAME "mydrv"
+#define DEVICE_NAME "mychardev"
+#define CLASS_NAME  "mychardev_class"
 
-// IOCTL commands
-#define MYDRV_SET_TIMER_VAL  _IOW('a', 1, int)
-#define MYDRV_ENABLE_TIMER  _IO('a', 2)
-#define MYDRV_STOP_TIMER    _IO('a', 3)
 
-// device data 
+#define MY_MAGIC        'M'
+#define IOCTL_GET_VAL   _IOR(MY_MAGIC, 1, int)  
+#define IOCTL_SET_VAL   _IOW(MY_MAGIC, 2, int)  
+#define IOCTL_CLR_VAL   _IO(MY_MAGIC,  3)       
 
-static dev_t dev;
+static dev_t dev_num;
 static struct cdev my_cdev;
-static struct class *dev_class;
-
-// timer & work 
-
-static struct hrtimer my_timer;
-static struct work_struct my_work;
-
-// synchronization 
-
-static spinlock_t state_lock;     /* protects flags */
-static struct mutex work_mutex;   /* sleepable section */
-static struct semaphore sem;      /* demo blocking */
-static atomic_t stop_requested;
+static struct class  *my_class;
+static struct device *my_device;
 
 
-static int timer_val_sec = 1;
-static int timer_enabled;
+static int dev_value = 0;
 
- //     workqueue function 
 
-static void my_work_fn(struct work_struct *work)
+
+static int my_open(struct inode *inode, struct file *filp)
 {
-    if (atomic_read(&stop_requested))
-        return;
-
-    mutex_lock(&work_mutex);
-    down(&sem);
-
-    printk(KERN_INFO "mydrv: workqueue started\n");
-
-    msleep(timer_val_sec * 1000);
-
-    if (!atomic_read(&stop_requested))
-        printk(KERN_INFO "mydrv: workqueue finished\n");
-
-    up(&sem);
-    mutex_unlock(&work_mutex);
-}
-
-//  hrtimer callback
-
-static enum hrtimer_restart my_timer_fn(struct hrtimer *t)
-{
-    if (atomic_read(&stop_requested))
-        return HRTIMER_NORESTART;
-
-    schedule_work(&my_work);
-    return HRTIMER_NORESTART;
-}
-
-//  file operations 
-
-static int my_open(struct inode *inode, struct file *file)
-{
-    printk(KERN_INFO "mydrv: device opened\n");
+    pr_info("mychardev: open\n");
     return 0;
 }
 
-static int my_release(struct inode *inode, struct file *file)
+static int my_release(struct inode *inode, struct file *filp)
 {
-    printk(KERN_INFO "mydrv: device closed\n");
+    pr_info("mychardev: release\n");
     return 0;
 }
 
-static long my_ioctl(struct file *file,
-                     unsigned int cmd,
-                     unsigned long arg)
+
+static long my_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
     int val;
 
-    switch (cmd) {
+    if (cmd == IOCTL_GET_VAL) {
+        val = dev_value;
 
-    case MYDRV_SET_TIMER_VAL:
-        if (copy_from_user(&val, (int __user *)arg, sizeof(int)))
+        if (copy_to_user((int __user *)arg, &val, sizeof(val)))
             return -EFAULT;
 
-        spin_lock(&state_lock);
-        timer_val_sec = val;
-        spin_unlock(&state_lock);
-
-        printk(KERN_INFO "mydrv: SET_TIMER_VAL = %d sec\n", val);
-        break;
-
-    case MYDRV_ENABLE_TIMER:
-        spin_lock(&state_lock);
-        timer_enabled = 1;
-        atomic_set(&stop_requested, 0);
-        spin_unlock(&state_lock);
-
-        hrtimer_start(&my_timer,
-                      ktime_set(timer_val_sec, 0),
-                      HRTIMER_MODE_REL);
-
-        printk(KERN_INFO "mydrv: ENABLE_TIMER\n");
-        break;
-
-    case MYDRV_STOP_TIMER:
-        spin_lock(&state_lock);
-        timer_enabled = 0;
-        atomic_set(&stop_requested, 1);
-        spin_unlock(&state_lock);
-
-        hrtimer_cancel(&my_timer);
-        cancel_work_sync(&my_work);
-
-        printk(KERN_INFO "mydrv: STOP_TIMER\n");
-        break;
-
-    default:
-        return -EINVAL;
+        pr_info("mychardev: ioctl GET_VAL=%d\n", val);
+        return 0;
     }
 
-    return 0;
+    if (cmd == IOCTL_SET_VAL) {
+        if (copy_from_user(&val, (int __user *)arg, sizeof(val)))
+            return -EFAULT;
+
+        dev_value = val;
+        pr_info("mychardev: ioctl SET_VAL=%d\n", dev_value);
+        return 0;
+    }
+
+    if (cmd == IOCTL_CLR_VAL) {
+        dev_value = 0;
+        pr_info("mychardev: ioctl CLR_VAL\n");
+        return 0;
+    }
+
+    return -ENOTTY; 
 }
 
-// fops 
-
-static struct file_operations fops = {
+static const struct file_operations my_fops = {
     .owner          = THIS_MODULE,
     .open           = my_open,
     .release        = my_release,
     .unlocked_ioctl = my_ioctl,
 };
 
-//  init 
 
-static int __init my_init(void)
+
+static int __init mychardev_init(void)
 {
     int ret;
 
-    ret = alloc_chrdev_region(&dev, 0, 1, DEVICE_NAME);
-    if (ret)
+    pr_info("mychardev: init\n");
+
+   
+    ret = alloc_chrdev_region(&dev_num, 0, 1, DEVICE_NAME);
+    if (ret < 0) {
+        pr_err("mychardev: alloc_chrdev_region failed\n");
         return ret;
-
-    cdev_init(&my_cdev, &fops);
-    ret = cdev_add(&my_cdev, dev, 1);
-    if (ret)
-        goto err_cdev;
-
-    dev_class = class_create(DEVICE_NAME);
-    if (IS_ERR(dev_class)) {
-        ret = PTR_ERR(dev_class);
-        goto err_class;
     }
 
-    device_create(dev_class, NULL, dev, NULL, DEVICE_NAME);
+  
+    cdev_init(&my_cdev, &my_fops);
+    ret = cdev_add(&my_cdev, dev_num, 1);
+    if (ret < 0) {
+        pr_err("mychardev: cdev_add failed\n");
+        unregister_chrdev_region(dev_num, 1);
+        return ret;
+    }
 
-    spin_lock_init(&state_lock);
-    mutex_init(&work_mutex);
-    sema_init(&sem, 1);
-    atomic_set(&stop_requested, 0);
+   
+    my_class = class_create(CLASS_NAME);
+    if (IS_ERR(my_class)) {
+        ret = PTR_ERR(my_class);
+        pr_err("mychardev: class_create failed\n");
+        cdev_del(&my_cdev);
+        unregister_chrdev_region(dev_num, 1);
+        return ret;
+    }
 
-    INIT_WORK(&my_work, my_work_fn);
+    my_device = device_create(my_class, NULL, dev_num, NULL, DEVICE_NAME);
+    if (IS_ERR(my_device)) {
+        ret = PTR_ERR(my_device);
+        pr_err("mychardev: device_create failed\n");
+        class_destroy(my_class);
+        cdev_del(&my_cdev);
+        unregister_chrdev_region(dev_num, 1);
+        return ret;
+    }
 
-    hrtimer_init(&my_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
-    my_timer.function = my_timer_fn;
-
-    printk(KERN_INFO "mydrv: driver loaded\n");
+    pr_info("mychardev: loaded major=%d minor=%d\n",
+            MAJOR(dev_num), MINOR(dev_num));
     return 0;
-
-err_class:
-    cdev_del(&my_cdev);
-err_cdev:
-    unregister_chrdev_region(dev, 1);
-    return ret;
 }
 
-//  exit 
-
-static void __exit my_exit(void)
+static void __exit mychardev_exit(void)
 {
-    atomic_set(&stop_requested, 1);
-    hrtimer_cancel(&my_timer);
-    cancel_work_sync(&my_work);
+    pr_info("mychardev: exit\n");
 
-    device_destroy(dev_class, dev);
-    class_destroy(dev_class);
+    device_destroy(my_class, dev_num);
+    class_destroy(my_class);
     cdev_del(&my_cdev);
-    unregister_chrdev_region(dev, 1);
+    unregister_chrdev_region(dev_num, 1);
 
-    printk(KERN_INFO "mydrv: driver unloaded\n");
+    pr_info("mychardev: unloaded\n");
 }
 
-module_init(my_init);
-module_exit(my_exit);
+module_init(mychardev_init);
+module_exit(mychardev_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Rana Yuvraj Singh");
-MODULE_DESCRIPTION("Advanced char driver with ioctl, hrtimer, workqueue & sync");
+MODULE_AUTHOR("Rana Yuvraj");
+MODULE_DESCRIPTION("Char driver with entry points + ioctl + class/device");
