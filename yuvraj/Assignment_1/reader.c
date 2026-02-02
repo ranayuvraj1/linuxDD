@@ -12,53 +12,64 @@
 
 int main(void)
 {
-    int shmid;
-    void *shared_memory;
-
-    shmid = shmget(SHM_KEY, SHM_SIZE, 0666 | IPC_CREAT);
-    if (shmid < 0)
-    {
-        perror("shmget");
-        exit(1);
-    }
-
-    shared_memory = shmat(shmid, NULL, 0);
-    if (shared_memory == (void *)-1)
-    {
-        perror("shmat");
-        exit(1);
-    }
-
-    char *message = (char *)shared_memory;
-
-    sem_t *mutex = sem_open(MUTEX_SEM, O_CREAT, 0666, 1);
-    sem_t *data = sem_open(DATA_SEM, O_CREAT, 0666, 0);
-    if (mutex == SEM_FAILED || data == SEM_FAILED)
-    {
-        perror("sem_open");
-        exit(1);
-    }
-
-    printf("Reader [ pid -> %d ] waiting ...\n", getpid());
+  int shmid = -1;
+  void *shared_memory = (void *)-1;
+  char *message = NULL;
+  sem_t *mutex = SEM_FAILED;
+  sem_t *data = SEM_FAILED;
+  FILE *fp = NULL;
 
 
-    sem_wait(data); 
 
-    sem_wait(mutex); 
-    printf("Reader got -> %s\n", message);
+shmid = shmget(SHM_KEY, SHM_SIZE, 0666 | IPC_CREAT);
+if (shmid < 0)
+    goto cleanup;
 
-    FILE *fp = fopen(LOG_FILE, "a");
-    if (fp)
-    {
-        fprintf(fp, "Reader PID %d: %s\n", getpid(), message);
-        fclose(fp);
-    }
 
-    sem_post(mutex); 
+shared_memory = shmat(shmid, NULL, 0);
+if (shared_memory == (void *)-1)
+    goto cleanup;
 
-    shmdt(shared_memory);
+
+message = (char *)shared_memory;
+
+
+mutex = sem_open(MUTEX_SEM, O_CREAT, 0666, 1);
+if (mutex == SEM_FAILED)
+    goto cleanup;
+
+
+data = sem_open(DATA_SEM, O_CREAT, 0666, 0);
+if (data == SEM_FAILED)
+    goto cleanup;
+
+
+sem_wait(data);
+sem_wait(mutex);
+
+
+printf("Reader got -> %s\n", message);
+
+
+fp = fopen(LOG_FILE, "a");
+
+
+if (fp)
+{
+    fprintf(fp, "Reader PID %d: %s\n", getpid(), message);
+    fclose(fp);
+}
+
+
+sem_post(mutex);
+
+
+cleanup : if (data != SEM_FAILED) sem_close(data);
+if (mutex != SEM_FAILED)
     sem_close(mutex);
-    sem_close(data);
+if (shared_memory != (void *)-1)
+    shmdt(shared_memory);
 
-    return 0;
+return 0;
+
 }
