@@ -13,60 +13,61 @@
 
 int main(void)
 {
-    int shmid;
-    void *shared_memory;
+    int shmid = -1;
+    void *shared_memory = (void *)-1;
     char input[SHM_SIZE];
+
+    sem_t *mutex = SEM_FAILED;
+    sem_t *data = SEM_FAILED;
+    FILE *fp = NULL;
 
     shmid = shmget(SHM_KEY, SHM_SIZE, 0666 | IPC_CREAT);
     if (shmid < 0)
-    {
-        perror("shmget");
-        exit(1);
-    }
+        goto cleanup;
 
     shared_memory = shmat(shmid, NULL, 0);
     if (shared_memory == (void *)-1)
-    {
-        perror("shmat"); 
-        exit(1);
-    }
+        goto cleanup;
 
-    sem_t *mutex = sem_open(MUTEX_SEM, O_CREAT, 0666, 1);
-    sem_t *data = sem_open(DATA_SEM, O_CREAT, 0666, 0);
-    if (mutex == SEM_FAILED || data == SEM_FAILED)
-    {
-        perror("sem_open");
-        exit(1);
-    }
+    mutex = sem_open(MUTEX_SEM, O_CREAT, 0666, 1);
+    if (mutex == SEM_FAILED)
+        goto cleanup;
+
+    data = sem_open(DATA_SEM, O_CREAT, 0666, 0);
+    if (data == SEM_FAILED)
+        goto cleanup;
 
     printf("Enter message: ");
     if (fgets(input, SHM_SIZE, stdin) == NULL)
-    {
-        printf("No input\n");
-        return 0;
-    }
+        goto cleanup;
+
     input[strcspn(input, "\n")] = '\0';
 
-    sem_wait(mutex); 
+    sem_wait(mutex);
 
     strncpy((char *)shared_memory, input, SHM_SIZE);
     ((char *)shared_memory)[SHM_SIZE - 1] = '\0';
 
-    FILE *fp = fopen(LOG_FILE, "a");
-    if (fp)
-    {
+    fp = fopen(LOG_FILE, "a");
+    
+    if (fp) {
         fprintf(fp, "Writer PID %d: %s\n", getpid(), input);
         fclose(fp);
     }
 
-    sem_post(mutex); 
-    sem_post(data);  
+    sem_post(mutex);
+    sem_post(data);
 
-    printf("Message written to shared memory.\n");
+cleanup:
 
-    shmdt(shared_memory);
-    sem_close(mutex);
-    sem_close(data);
+    if (data != SEM_FAILED)
+        sem_close(data);
+
+    if (mutex != SEM_FAILED)
+        sem_close(mutex);
+
+    if (shared_memory != (void *)-1)
+        shmdt(shared_memory);
 
     return 0;
 }
